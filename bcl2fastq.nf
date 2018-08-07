@@ -17,7 +17,6 @@ import java.io.File
 // 1. Java memory allocation is hard-coded right now à la -Xmx64000000k - Not super urgent since we can specify resources per process.
 // 2. Add help message
 
-
 // Defaults and input params ****************************************************************************************************
 samplesheet = params.samplesheet
 params.max_mismatches = params['cutoffs_and_thresholds'].max_mismatches
@@ -48,6 +47,7 @@ params.skipKronaReports = false
 params.skipCombinedKronaReports = false
 params.skipMultiQc = false
 params.skipIlluminate = false
+params.skipZipKronaReports = false
 params.run_uri = '' // Initialize run URI
 params.admin = params['emails'].admin
 
@@ -62,6 +62,16 @@ barcodesOutputDir = MiscUtils.createOutputDir(samplesheet, workflow.resume) // O
 (num_reads,run_id, flowcell, machine_name, lanecount, read_structure, has_umi) = MiscUtils.parseRunXml(runDir, samplesheet, headerLines) // Gather basic run data.
 
 
+// Dynamically determine whether to zip krona reports or create a combined krona report.
+// Github issue:  github.com/nebiolabs/seq-shepherd/issues/44
+def overrideSkipCombinedKronaReports = false
+def overrideSkipZipKronaReports = false
+
+if ('miseq'.equalsIgnoreCase(instrument)) {
+	overrideSkipZipKronaReports = true
+} else {
+	overrideSkipCombinedKronaReports = true
+}
 
 // Creates lane*multiplex_params.txt and lane*library_params.txt for each lane for use by picard. Will be replaced by fgbio's functions
 MiscUtils.retrieveLibraryParams(preProcessDir, samplesheet, lanecount, headerLines, num_reads)
@@ -405,10 +415,16 @@ process zipKronaReports {
 
 	script:
 	krona_reports = Channel.fromPath("${barcodesOutputDir}/Krona/**.html").toList().getVal().join(" ")
-	"""
-	zip -j  ${run_id}.krona.zip  ${krona_reports}
-	"""
-
+	
+	if (!overrideSkipZipKronaReports && !params.skipKrakenClassify) {
+		"""
+		zip -j  ${run_id}.krona.zip  ${krona_reports}
+		"""
+	} else {
+		"""
+		touch ${run_id}.krona.zip
+		"""
+	}
 }
 
 
@@ -421,7 +437,7 @@ process createCombinedKronaReport {
 	errorStrategy 'retry'
 	maxRetries 3
 
-	when: !params.dryrun 
+	when: !params.dryrun
 
 	input:
 	file krakenMarkerCombined from krakenClassifyCompletionMarkerKronaCombined.toList()
@@ -431,7 +447,7 @@ process createCombinedKronaReport {
 
 	script:
 	krona_inputs = Channel.fromPath("${barcodesOutputDir}/Kraken/**.kraken").toList().getVal().join(" ")
-	if (!params.skipCombinedKronaReports && !params.skipKrakenClassify) {
+	if (!overrideSkipCombinedKronaReports && !params.skipKrakenClassify) {
 			"""
 			ssh seq-shepherd@seq-himem02 '${params.ktImportTaxonomy} -o ${barcodesOutputDir}/Contamination.kraken_Report.html -t 3 -s 4  ${krona_inputs}'
 			touch Combined_Krona_Report_Complete.txt
@@ -624,10 +640,10 @@ process notifyUsersRuby {
 	// def filesToAttach = ["${barcodesOutputDir}/unassigned_barcode_frequency.txt"] 
 	def filesToAttach = []
 	if(!params.skipMultiQc) { filesToAttach.add("${barcodesOutputDir}/MultiQC/multiqc_report.html")	}									
-	if(!params.skipCombinedKronaReports && !params.skipKrakenClassify ) {
-	filesToAttach.add("${barcodesOutputDir}/Contamination.kraken_Report.html")
+	if(!params.skipCombinedKronaReports && !params.skipKrakenClassify && overrideSkipZipKronaReports ) {
+		filesToAttach.add("${barcodesOutputDir}/Contamination.kraken_Report.html")
 	}  
-	if(!params.zipKronaReports && !params.skipKrakenClassify) {
+	if(!params.skipZipKronaReports && !params.skipKrakenClassify && overrideSkipCombinedKronaReports) {
 		filesToAttach.add("${barcodesOutputDir}/Krona/${run_id}.krona.zip")
 	}
 	attachments = filesToAttach.join(", ")
